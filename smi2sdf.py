@@ -7,6 +7,7 @@ structures of molecules based on an input SMILES string.
 The code is based on GB-GA (https://github.com/cstein/GB-GA) which is
 a fork of Jan Jensen's GB-GA (https://github.com/jensengroup/GB-GA).
 """
+import argparse
 import errno
 import multiprocessing as mp
 import os
@@ -14,7 +15,7 @@ import random
 import string
 import subprocess
 import sys
-from typing import Optional
+from typing import Optional, List
 
 from rdkit import Chem
 from rdkit.Chem import AllChem
@@ -32,14 +33,14 @@ def safe_create_dir(path: str):
             raise
 
 
-def read_smi_file(filename: str, i_from: int, i_to: int):
+def read_smi_file(filename: str, i_from: int, i_to: int) -> List[Chem.Mol]:
     """ Reads a file with SMILES between two indices
 
         :param filename: the filename to read SMILES from
         :param i_from: where to search from in the file
         :param i_to: where to search to (but not included)
     """
-    mol_list = []
+    mol_list: List[Chem.Mol] = []
     with open(filename, 'r') as smiles_file:
         for i, line in enumerate(smiles_file):
             if i_from <= i < i_to:
@@ -58,16 +59,14 @@ def shell(cmd: str):
     try:
         p = subprocess.run(cmd, capture_output=True, shell=True)
     except AttributeError:
-        # p = subprocess.Popen(cmd, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        # output, err = p.communicate()
         pass
     else:
         if p.returncode > 0:
             print("shell:", p)
-            raise ValueError("Error with Docking.")
+            raise ValueError("Error with structure generation.")
 
 
-def get_structure(mol, num_conformations):
+def get_structure(mol: Chem.Mol, num_conformations: int, index: int):
     """ Converts an RDKit molecule (2D representation) to a 3D representation
 
     :param Chem.Mol mol: the RDKit molecule
@@ -88,45 +87,44 @@ def get_structure(mol, num_conformations):
 
     new_mol = Chem.Mol(mol)
 
+    conformer_energies = []
     try:
-        if num_conformations > 0:
-            AllChem.EmbedMultipleConfs(mol, numConfs=num_conformations, useExpTorsionAnglePrefs=True, useBasicKnowledge=True)
-            conformer_energies = AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=2000, nonBondedThresh=100.0)
-            energies = [e[1] for e in conformer_energies]
-            min_energy_index = energies.index(min(energies))
-            new_mol.AddConformer(mol.GetConformer(min_energy_index))
-        else:
-            AllChem.EmbedMolecule(new_mol)
-            AllChem.MMFFOptimizeMolecule(new_mol)
+        AllChem.EmbedMultipleConfs(mol, numConfs=num_conformations, useExpTorsionAnglePrefs=True, useBasicKnowledge=True)
+        conformer_energies = AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=2000, nonBondedThresh=100.0)
     except ValueError:
         print("get_structure: '{}' could not converted to 3D".format(s_mol))
         new_mol = None
-    finally:
-        return new_mol
+    print(conformer_energies)
+    print("index on input:", index)
+    if index == 0:
+        i = conformer_energies.index(min(conformer_energies))
+    elif index > 0:
+        i = index - 1
+    else:
+        raise ValueError("index cannot be less that zero.")
+    print("index to take: ", i)
+    new_mol.AddConformer(mol.GetConformer(i))
+    return new_mol
 
 
-def choices(sin, nin=6):
-    result = []
-    try:
-        result = random.choices(sin, k=nin)
-    except AttributeError:
-        for i in range(nin):
-            result.append( random.choice(sin) )
-    finally:
-        return result
-
-
-def molecules_to_structure(population, num_conformations, num_cpus):
+def molecules_to_structure(population: List[Chem.Mol],
+                           num_conformations: int,
+                           index: int,
+                           num_cpus: int):
     """ Converts RDKit molecules to structures
 
+        :param population: the entire set of molecules to obtain 3D structures for
+        :param num_conformations: the number of conformations to generate for each molecule
+        :param index: the index to return for each structure. 0 is minimum. > 0 is an index
+        :param num_cpus: allocate a number of CPUs to parallelize the task
     """
 
     with mp.Pool(num_cpus) as pool:
-        args = [(p, num_conformations) for p in population]
+        args = [(p, num_conformations, index) for p in population]
         generated_molecules = pool.starmap(get_structure, args)
    
         molecules = [mol for mol in generated_molecules if mol is not None]
-        names = [''.join(choices(string.ascii_uppercase + string.digits, 6)) for pop in molecules]
+        names = [''.join(random.choices(string.ascii_uppercase + string.digits, k=6)) for pop in molecules]
         updated_population = [p for (p, m) in zip(population, generated_molecules) if m is not None]
 
         return molecules, names, updated_population
@@ -148,24 +146,41 @@ def molecule_to_sdf(mol: Chem.Mol, output_filename: str, name: Optional[str] = N
 
 
 if __name__ == '__main__':
-    filename = sys.argv[1]
-    index = int(sys.argv[2])
-    width = int(sys.argv[3])
-    i_from = (index-1) * width
+    ap = argparse.ArgumentParser()
+    ap.add_argument("filename", type=str, metavar="file")
+    ap.add_argument("-i", "--index", dest="index", type=int, metavar="number", default=1,
+                    help="index to start from. Default is %(default)s.")
+    ap.add_argument("-w", "--width", dest="width", type=int, metavar="number", default=1,
+                    help="number of entries to parse. Default is %(default)s.")
+    ap.add_argument("--cpus", dest="num_cpus", type=int, default=1, metavar="number",
+                    help="number of CPUs to use in parallel. Default is %(default)s.")
+    ap.add_argument("--confs", dest="num_confs", type=int, default=5, metavar="number",
+                    help="number of conformations to generate. Sorted by energy. Default is %(default)s.")
+    ap.add_argument("-c", dest="index_conformer", type=int, default=0, metavar="number",
+                    help="index of generated conformer to write to file. A value of 0 means minimum energy. Default is %(default)s.")
+    args = ap.parse_args()
+    filename = args.filename
+    index = args.index
+    width = args.width
+    num_cpus = args.num_cpus
+    num_confs = args.num_confs
+    idx_conformer = args.index_conformer
+    print(args)
+    i_from = index-1
     i_to = i_from + width
-    num_cpus = 1
-    population = read_smi_file(filename, i_from, i_to)
-    pop_names = ["{0:05d}".format(i) for i in range(i_from+1, i_to+1)]
+    initial_population = read_smi_file(filename, i_from, i_to)
+    pop_names = ["{0:06d}".format(i) for i in range(i_from+1, i_to+1)]
     basename, _ = os.path.splitext(filename)
     wrk_dir = basename
     safe_create_dir(wrk_dir)
 
     # change to work directory
     os.chdir(wrk_dir)
-    molecules, _, _ = molecules_to_structure(population, 5, num_cpus)
+    molecules, _, _ = molecules_to_structure(initial_population, num_confs, idx_conformer, num_cpus)
     filenames = ["{0:s}.sdf".format(s) for s in pop_names]
     for molecule, filename, mol_name in zip(molecules, filenames, pop_names):
         molecule_to_sdf(molecule, filename, name=mol_name)
 
     # go back from work directory
     os.chdir("..")
+
