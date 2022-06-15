@@ -66,7 +66,7 @@ def shell(cmd: str):
             raise ValueError("Error with structure generation.")
 
 
-def get_structure(mol: Chem.Mol, num_conformations: int, index: int):
+def get_structure(mol: Chem.Mol, num_conformations: int, index: int) -> Optional[Chem.Mol]:
     """ Converts an RDKit molecule (2D representation) to a 3D representation
 
     :param Chem.Mol mol: the RDKit molecule
@@ -93,16 +93,19 @@ def get_structure(mol: Chem.Mol, num_conformations: int, index: int):
         conformer_energies = AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=2000, nonBondedThresh=100.0)
     except ValueError:
         print("get_structure: '{}' could not converted to 3D".format(s_mol))
-        new_mol = None
-    print(conformer_energies)
-    print("index on input:", index)
+        return None
+    # print(conformer_energies)
+    # print("index on input:", index)
     if index == 0:
-        i = conformer_energies.index(min(conformer_energies))
+        try:
+            i = conformer_energies.index(min(conformer_energies))
+        except ValueError:
+            print("get_structure: '{}' no energies for conformers".format(s_mol))
+            return None
     elif index > 0:
         i = index - 1
     else:
         raise ValueError("index cannot be less that zero.")
-    print("index to take: ", i)
     new_mol.AddConformer(mol.GetConformer(i))
     return new_mol
 
@@ -123,11 +126,11 @@ def molecules_to_structure(population: List[Chem.Mol],
         args = [(p, num_conformations, index) for p in population]
         generated_molecules = pool.starmap(get_structure, args)
    
-        molecules = [mol for mol in generated_molecules if mol is not None]
-        names = [''.join(random.choices(string.ascii_uppercase + string.digits, k=6)) for pop in molecules]
+        # molecules = [mol for mol in generated_molecules if mol is not None]
+        names = [''.join(random.choices(string.ascii_uppercase + string.digits, k=6)) for pop in generated_molecules]
         updated_population = [p for (p, m) in zip(population, generated_molecules) if m is not None]
 
-        return molecules, names, updated_population
+        return generated_molecules, names, updated_population
 
 
 def molecule_to_sdf(mol: Chem.Mol, output_filename: str, name: Optional[str] = None):
@@ -179,7 +182,8 @@ if __name__ == '__main__':
     molecules, _, _ = molecules_to_structure(initial_population, num_confs, idx_conformer, num_cpus)
     filenames = ["{0:s}.sdf".format(s) for s in pop_names]
     for molecule, filename, mol_name in zip(molecules, filenames, pop_names):
-        molecule_to_sdf(molecule, filename, name=mol_name)
+        if molecule is not None:
+            molecule_to_sdf(molecule, filename, name=mol_name)
 
     # go back from work directory
     os.chdir("..")
