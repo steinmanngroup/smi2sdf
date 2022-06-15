@@ -20,6 +20,15 @@ from typing import Optional, List
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
+has_protonator = False
+try:
+    from protonator import protonator
+except ImportError:
+    print("disabling protonation states for smi2sdf")
+    protonator = None
+else:
+    has_protonator = True
+
 
 def safe_create_dir(path: str):
     """ Creates a directory safely by not raising an error if it already exists
@@ -78,6 +87,9 @@ def get_structure(mol: Chem.Mol, num_conformations: int, index: int) -> Optional
     except ValueError:
         print("get_structure: could not convert molecule to SMILES")
         return None
+
+    if has_protonator:
+        mol = protonator(mol)
 
     try:
         mol = Chem.AddHs(mol)
@@ -161,6 +173,9 @@ if __name__ == '__main__':
                     help="number of conformations to generate. Sorted by energy. Default is %(default)s.")
     ap.add_argument("-c", dest="index_conformer", type=int, default=0, metavar="number",
                     help="index of generated conformer to write to file. A value of 0 means minimum energy. Default is %(default)s.")
+    if has_protonator:
+        ap.add_argument("-p", dest="protonator", default=False, action="store_true",
+                        help="add this flag to give the most probably protonation states for each molecule")
     args = ap.parse_args()
     filename = args.filename
     index = args.index
